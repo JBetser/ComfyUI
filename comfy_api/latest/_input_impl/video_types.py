@@ -554,6 +554,8 @@ class VideoFromComponents(VideoInput):
                 waveform = self.__components.audio['waveform']
                 waveform = waveform[0, :, :math.ceil((audio_sample_rate / frame_rate) * self.__components.images.shape[0])]
                 layout = {1: 'mono', 2: 'stereo', 6: '5.1'}.get(waveform.shape[0], 'stereo')
+                print(f"AUDIO DEBUG: waveform shape={waveform.shape}, sample_rate={audio_sample_rate}, layout={layout}")
+                print(f"AUDIO DEBUG: waveform shape={waveform.shape}, sample_rate={audio_sample_rate}, layout={layout}")
                 audio_stream = output.add_stream('aac', rate=audio_sample_rate, layout=layout)
 
             # Encode video
@@ -574,10 +576,31 @@ class VideoFromComponents(VideoInput):
             output.mux(packet)
 
             if audio_stream and self.__components.audio:
-                frame = av.AudioFrame.from_ndarray(waveform.float().cpu().contiguous().numpy(), format='fltp', layout=layout)
-                frame.sample_rate = audio_sample_rate
-                frame.pts = 0
-                output.mux(audio_stream.encode(frame))
+                audio_data = waveform.float().cpu().contiguous().numpy()
+                chunk_size = 1024
+                pts = 0
+                num_samples = audio_data.shape[-1]
+                for start in range(0, num_samples, chunk_size):
+                    end = min(start + chunk_size, num_samples)
+                    chunk = audio_data[..., start:end]
+                    def sanitize_audio(audio_array):
+                        # Clip values to valid float ranges (e.g., -1.0 to 1.0)
+                        # This automatically clamps +Inf to 1.0 and -Inf to -1.0
+                        sanitized = np.clip(audio_array, -1.0, 1.0)
+    
+                        # Replace any explicit NaN values with 0
+                        sanitized = np.nan_to_num(sanitized, nan=0.0)
+    
+                        return sanitized
+
+                    # 1. Clean data
+                    clean_audio = sanitize_audio(chunk)
+                    
+                    frame = av.AudioFrame.from_ndarray(clean_audio, format='fltp', layout=layout)
+                    frame.sample_rate = audio_sample_rate
+                    frame.pts = pts
+                    pts += chunk.shape[-1]
+                    output.mux(audio_stream.encode(frame))
 
                 # Flush encoder
                 output.mux(audio_stream.encode(None))
